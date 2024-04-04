@@ -1,60 +1,36 @@
+import { mul, perspectiveProjection, rotatex, rotatey, traslate } from "./matrix_utils.js";
+import { createCubeMesh } from "./mesh.js";
+
 const startTime = Date.now() / 1000;
-
-if (!navigator.gpu) {
-    throw Error("WebGPU not supported.");
-}
-console.log("WebGPU supported...");
-
-const adapter = await navigator.gpu.requestAdapter();
-if (!adapter) {
-    throw Error("Couldn't request WebGPU adapter.");
-}
-console.log("WebGPU adapter created...");
-
-const device = await adapter.requestDevice();
-console.log("WebGPU device requested...");
-
-const shaders = `
-@group(0) @binding(0) var<uniform> model: mat4x4f;
-@group(0) @binding(1) var<uniform> view: mat4x4f;
-@group(0) @binding(2) var<uniform> projection: mat4x4f;
-
-@group(1) @binding(0) var<uniform> t: f32;
-
-struct VertexOut {
-    @builtin(position) position: vec4f,
-    @location(0) color: vec4f
-}
-
-@vertex
-fn vertex_main(@location(0) position: vec4f, @location(1) color: vec4f) -> VertexOut {
-    var output: VertexOut;
-    output.position = ((position * model) * view) * projection;
-    output.color = color;
-    return output;
-}
-
-@fragment
-fn fragment_main(fragData: VertexOut) -> @location(0) vec4f {
-    return fragData.color;
-}
-`;
 
 let gameState = {
     camera: {
         position: [ 0, 0, 5 ],
         // Pitch (x rot), Yaw (y rot), Roll (z rot)
-        rotation: [ 0, 0, 0 ]
+        rotation: [ Math.PI/4, -Math.PI/4, 0 ]
     },
     coobe: {
-        position: [ -0.5, -0.5, -0.5 ],
+        position: [ -0.5 - 3, -0.5 - 4, -0.5 - 3],
         rotation: [ 0, 0, 0 ]
     }
 };
 
+if (!navigator.gpu) {
+    throw Error("WebGPU not supported.");
+}
+
+const adapter = await navigator.gpu.requestAdapter();
+if (!adapter) {
+    throw Error("Couldn't request WebGPU adapter.");
+}
+
+const device = await adapter.requestDevice();
+
+let shaderCode = await fetch("/resources/shader.wgsl").then(response => response.text()).then(sc => sc);
+
 const shaderModule = device.createShaderModule(
     {
-        code: shaders
+        code: shaderCode
     }
 );
 
@@ -69,30 +45,7 @@ context.configure(
     }
 );
 
-const vertices = new Float32Array(
-    [   // Voxel
-        0, 1, 0, 1,
-        1, 0, 0, 1,
-
-        1, 1, 0, 1,
-        0, 1, 0, 1,
-
-        0, 0, 0, 1,
-        0, 0, 1, 1,
-
-        1, 0, 0, 1,
-        0, 1, 1, 1
-    ]
-);
-
-const vertexBuffer = device.createBuffer(
-    {
-        size: vertices.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-    }
-);
-
-device.queue.writeBuffer(vertexBuffer, 0, vertices, 0, vertices.length);
+const cube = createCubeMesh(device);
 
 const vertexBuffers: GPUVertexBufferLayout[] = [
     {
@@ -175,10 +128,23 @@ const pipelineDescriptor: GPURenderPipelineDescriptor = {
         ]
     },
     primitive: {
-        topology: "triangle-strip"
+        topology: "triangle-list"
     },
-    layout: pipelineLayout
+    layout: pipelineLayout,
+    depthStencil: {
+        depthWriteEnabled: true,
+        depthCompare: "less",
+        format: "depth24plus"
+    }
 };
+
+const depthTexture = device.createTexture(
+    {
+        size: [canvas.width, canvas.height],
+        format: "depth24plus",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    }
+);
 
 const renderPipeline = device.createRenderPipeline(pipelineDescriptor);
 
@@ -189,14 +155,7 @@ const modelBuffer = device.createBuffer(
     }
 );
 
-let modelData = new Float32Array(
-    [
-        1, 0, 0, gameState.coobe.position[0],
-        0, 1, 0, gameState.coobe.position[1],
-        0, 0, 1, gameState.coobe.position[2],
-        0, 0, 0, 1
-    ]
-);
+let modelData = new Float32Array(traslate(gameState.coobe.position[0], gameState.coobe.position[1], gameState.coobe.position[2]));
 
 device.queue.writeBuffer(modelBuffer, 0, modelData, 0, modelData.length);
 
@@ -207,16 +166,24 @@ const viewBuffer = device.createBuffer(
     }
 );
 
-let viewData = new Float32Array(
-    [
-        1, 0, 0, -gameState.camera.position[0],
-        0, 1, 0, -gameState.camera.position[1],
-        0, 0, 1, -gameState.camera.position[2],
-        0, 0, 0, 1
-    ]
-);
+function updateViewBuffer() {
+    let pos = gameState.camera.position;
+    let rot = gameState.camera.rotation;
 
-device.queue.writeBuffer(viewBuffer, 0, viewData, 0, viewData.length);
+    let traslation = traslate(-pos[0], -pos[1], -pos[2]);
+
+    let pitchRotation = rotatex(rot[0]);
+
+    let yawRotation = rotatey(rot[1]);
+
+    let rotation = new Float32Array(mul(pitchRotation, yawRotation));
+
+    let viewData = rotation;
+
+    device.queue.writeBuffer(viewBuffer, 0, viewData, 0, viewData.length);
+}
+
+updateViewBuffer();
 
 const projectionBuffer = device.createBuffer(
     {
@@ -225,21 +192,14 @@ const projectionBuffer = device.createBuffer(
     }
 );
 
-const fov = Math.PI / 2;    // 90deg
+const fov = Math.PI / 4;    // 45deg
 const aspectRatio = 16.0/9.0;
 const zNear = 1.0;
 const zFar = 100.0
 
 const f = Math.tan(Math.PI * 0.5 - 0.5 * fov);
 
-let projectionData = new Float32Array(
-    [
-        f/aspectRatio, 0, 0, 0,
-        0, f, 0, 0,
-        0, 0, zFar / (zNear - zFar), -1,
-        0, 0, zFar * zNear / (zNear - zFar), 0
-    ]
-);
+let projectionData = new Float32Array(perspectiveProjection(fov, aspectRatio, zNear, zFar));
 
 device.queue.writeBuffer(projectionBuffer, 0, projectionData, 0, projectionData.length);
 
@@ -301,8 +261,16 @@ function frame() {
                 storeOp: "store",
                 view: context.getCurrentTexture().createView()
             }
-        ]
+        ],
+        depthStencilAttachment: {
+            view: depthTexture.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store"
+        }
     };
+
+    updateViewBuffer();
 
     const now = (Date.now() / 1000) - startTime;
     let data = new Float32Array([now]);
@@ -313,14 +281,18 @@ function frame() {
         data.byteOffset,
         data.byteLength
       );
+
     const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
     passEncoder.setPipeline(renderPipeline);
     passEncoder.setBindGroup(0, mvpBindGroup);
     passEncoder.setBindGroup(1, tBindGroup);
 
-    passEncoder.setVertexBuffer(0, vertexBuffer);
+    
+    passEncoder.setVertexBuffer(0, cube.vertexBuffer);
+    passEncoder.setIndexBuffer(cube.indexBuffer, "uint16");
+    passEncoder.drawIndexed(cube.triangleCount * 3);
 
-    passEncoder.draw(4);
+
     passEncoder.end();
     
     device.queue.submit([commandEncoder.finish()]);
@@ -333,7 +305,16 @@ canvas.addEventListener("click", async () => {
 
 document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement) {
-        console.log("{} e {}", e.movementX, e.movementY);
+        // Pitch
+        gameState.camera.rotation[0] += e.movementY * 0.001;
+        if (gameState.camera.rotation[0] >  Math.PI / 2)
+            gameState.camera.rotation[0] =  Math.PI / 2;
+        if (gameState.camera.rotation[0] < -Math.PI / 2)
+            gameState.camera.rotation[0] = -Math.PI / 2;
+
+        // Yaw
+        gameState.camera.rotation[1] += e.movementX * 0.001;
+        gameState.camera.rotation[1] %= Math.PI * 2;
     }
 });
 
