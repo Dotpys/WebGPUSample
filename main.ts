@@ -1,5 +1,5 @@
 import { mul, perspectiveProjection, rotatex, rotatey, traslate } from "./matrix_utils.js";
-import { createCubeMesh } from "./mesh.js";
+import { createCubeMesh, loadMeshObj } from "./mesh.js";
 
 const startTime = Date.now() / 1000;
 
@@ -45,7 +45,9 @@ context.configure(
     }
 );
 
-const cube = createCubeMesh(device);
+let meshData = await fetch("/resources/torus.obj").then(response => response.text()).then(sc => sc);
+
+const cube = loadMeshObj(device, meshData);
 
 const vertexBuffers: GPUVertexBufferLayout[] = [
     {
@@ -130,6 +132,9 @@ const pipelineDescriptor: GPURenderPipelineDescriptor = {
     primitive: {
         topology: "triangle-list"
     },
+    multisample: {
+        count: 4
+    },
     layout: pipelineLayout,
     depthStencil: {
         depthWriteEnabled: true,
@@ -138,10 +143,20 @@ const pipelineDescriptor: GPURenderPipelineDescriptor = {
     }
 };
 
+const output = device.createTexture(
+    {
+        size: [canvas.width, canvas.height],
+        sampleCount: 4,
+        format: navigator.gpu.getPreferredCanvasFormat(),
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    }
+);
+
 const depthTexture = device.createTexture(
     {
         size: [canvas.width, canvas.height],
         format: "depth24plus",
+        sampleCount: 4,
         usage: GPUTextureUsage.RENDER_ATTACHMENT
     }
 );
@@ -259,7 +274,8 @@ function frame() {
                 clearValue: {r: 0.0, g: 0.5, b: 1.0, a: 1.0 },
                 loadOp: "clear",
                 storeOp: "store",
-                view: context.getCurrentTexture().createView()
+                view: output.createView(),
+                resolveTarget: context.getCurrentTexture().createView()
             }
         ],
         depthStencilAttachment: {
